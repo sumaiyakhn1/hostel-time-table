@@ -29,7 +29,7 @@ const API_BASE_URL =
   import.meta.env.VITE_API_URL ||
   (isLocalHost
     ? "http://localhost:5000"
-    : "https://timetableadjustmentod-2.onrender.com");
+    : "https://hostel-time-table.onrender.com");
 
 const AUTO_SAVE_DELAY = 2000;
 const BREAK_AFTER_IDX = 4;
