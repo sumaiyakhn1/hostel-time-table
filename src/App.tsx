@@ -29,7 +29,7 @@ const API_BASE_URL =
   import.meta.env.VITE_API_URL ||
   (isLocalHost
     ? "http://localhost:5000"
-    : "https://hostel-time-table.onrender.com");
+    : "https://timetableadjustmentod-2.onrender.com");
 
 const AUTO_SAVE_DELAY = 2000;
 const BREAK_AFTER_IDX = 4;
@@ -112,7 +112,7 @@ function loadTimings(): TimingData {
   try {
     const saved = localStorage.getItem(LS_TIMINGS_KEY);
     if (saved) return JSON.parse(saved);
-  } catch {}
+  } catch { }
   return DEFAULT_TIMINGS;
 }
 
@@ -136,7 +136,7 @@ function loadSchoolInfo(): SchoolInfo {
     const saved = localStorage.getItem(LS_SCHOOL_KEY);
     const logo = localStorage.getItem(LS_LOGO_KEY) || defaultSchoolLogo;
     if (saved) return { ...defaults, ...JSON.parse(saved), logoUrl: logo };
-  } catch {}
+  } catch { }
   return defaults;
 }
 
@@ -308,6 +308,7 @@ function buildPrintHTML(
   schoolInfo: SchoolInfo,
   periods: { label: string; time: string }[],
   majorBreak: { start: string; end: string },
+  teachers: Teacher[],
 ) {
   const totalCols = columns.length;
   // Adjusted width calculation: limit width for single/few teachers to prevent covering entire page
@@ -337,19 +338,19 @@ function buildPrintHTML(
 
   const theadHTML = `
     <tr>
-      <th colspan="3" rowspan="2" style="width:18%;text-align:center;vertical-align:middle;font-size:11px;letter-spacing:0.5px;">Period / Time</th>
-      <th colspan="${totalCols}" style="text-align:center;font-size:14px;letter-spacing:2px;font-weight:900;background:#1e293b;border-bottom:2px solid #475569!important;">TEACHERS ON LEAVE</th>
+      <th colspan="3" rowspan="2" style="width:18%;text-align:center;vertical-align:middle;font-size:11px;letter-spacing:0.5px;background:#e2e8f0!important;color:#1e293b!important;">Period / Time</th>
+      <th colspan="${totalCols}" style="text-align:center;font-size:14px;letter-spacing:2px;font-weight:900;background:#e2e8f0!important;color:#1e293b!important;border-bottom:2px solid #cbd5e1!important;">TEACHERS ON LEAVE</th>
     </tr>
     <tr>
       ${columns
-        .map(
-          (col) => `
-        <th style="width:${teacherW}%;background:#1e3a5f;padding:3px 2px!important;">
-          <div style="font-size:12px;font-weight:800;color:white;line-height:1.1;">${col.selectedTeacher || "— Not Selected —"}</div>
-          <div style="font-size:9px;font-weight:400;color:#93c5fd;margin-top:1px;">${selectedDay}</div>
+      .map(
+        (col) => `
+        <th style="width:${teacherW}%;background:#e2e8f0!important;color:#1e293b!important;padding:3px 2px!important;border:1px solid #94a3b8!important;">
+          <div style="font-size:12px;font-weight:800;color:#1e293b;line-height:1.1;">${col.selectedTeacher || "— Not Selected —"}</div>
+          <div style="font-size:9px;font-weight:400;color:#475569;margin-top:1px;">${selectedDay}</div>
         </th>`,
-        )
-        .join("")}
+      )
+      .join("")}
     </tr>`;
 
   let tbodyHTML = "";
@@ -377,7 +378,17 @@ function buildPrintHTML(
             ? cv.trim() === "" || cv.trim().toLowerCase() === "free"
             : true;
           const sub = col.substituteTeacher[pIdx] || "";
-          return `<td style="text-align:center;">${isFree ? `<span class="val-free"></span>` : `<span class="val-sub">${sub}</span>`}</td>`;
+          const teacherObj = teachers.find((t) => t.name === sub);
+          const freeText = (() => {
+            if (!teacherObj) return "";
+            const { before, after } = getFreePeriodCounts(
+              teacherObj,
+              selectedDay,
+              periods.length,
+            );
+            return ` (${before},${after})`;
+          })();
+          return `<td style="text-align:center;">${isFree ? `<span class="val-free"></span>` : `<span class="val-sub">${sub}${freeText}</span>`}</td>`;
         })
         .join("")}
     </tr>`;
@@ -407,7 +418,7 @@ function buildPrintHTML(
 export default function App() {
   const [currentPage, setCurrentPage] = useState<"home" | "records">("home");
   // ── Teacher column pagination ──────────────────────────────────────────────
-  const TEACHERS_PER_PAGE = 5;
+  const TEACHERS_PER_PAGE = 4;
   const [tablePageIdx, setTablePageIdx] = useState(0);
 
   const [schoolInfo, setSchoolInfo] = useState<SchoolInfo>(() =>
@@ -461,6 +472,8 @@ export default function App() {
   const isAutoSyncRef = useRef(false);
   // isSavingRef: true jab local change pending ho ya save ho raha ho — poller ko DB se overwrite karne se rokta hai
   const isSavingRef = useRef(false);
+  const [dbFetchCompleted, setDbFetchCompleted] = useState(false);
+  const lastSyncedColumnsRef = useRef<Column[] | null>(null);
 
   // ── Persist basic states (always keep local copy as fallback) ─────────────
   useEffect(() => {
@@ -488,20 +501,37 @@ export default function App() {
         const todayRecord = json.data.find(
           (r: AdjustmentRecord) => r.date === date,
         );
-        if (todayRecord && !isSavingRef.current) {
-          setColumns((prevCols) => {
-            const dbColsStr = JSON.stringify(todayRecord.columns);
-            const prevColsStr = JSON.stringify(prevCols);
-            if (dbColsStr !== prevColsStr) {
-              isAutoSyncRef.current = true;
-              return JSON.parse(dbColsStr);
+        if (todayRecord) {
+          if (!isSavingRef.current) {
+            setColumns((prevCols) => {
+              const dbColsStr = JSON.stringify(todayRecord.columns);
+              const prevColsStr = JSON.stringify(prevCols);
+              if (dbColsStr !== prevColsStr) {
+                isAutoSyncRef.current = true;
+                return JSON.parse(dbColsStr);
+              }
+              return prevCols;
+            });
+            if (selectedDay !== todayRecord.day) {
+              setSelectedDay(todayRecord.day);
             }
-            return prevCols;
-          });
-          if (selectedDay !== todayRecord.day) {
-            setSelectedDay(todayRecord.day);
+          }
+          lastSyncedColumnsRef.current = JSON.parse(JSON.stringify(todayRecord.columns));
+        } else {
+          // If no record exists for today in DB, initialize the ref to the default empty state
+          // so it matches the initial empty state of the app
+          if (lastSyncedColumnsRef.current === null) {
+            lastSyncedColumnsRef.current = [
+              {
+                id: 1,
+                selectedTeacher: "",
+                substituteTeacher: Array(9).fill(""),
+                classValues: Array(9).fill(""),
+              },
+            ];
           }
         }
+        setDbFetchCompleted(true);
       }
     } catch (err) {
       console.error("Failed to load records from DB:", err);
@@ -509,6 +539,8 @@ export default function App() {
   };
 
   useEffect(() => {
+    setDbFetchCompleted(false);
+    lastSyncedColumnsRef.current = null;
     fetchRecordsFromDB();
     const intervalId = setInterval(fetchRecordsFromDB, 5000);
     return () => clearInterval(intervalId);
@@ -516,10 +548,17 @@ export default function App() {
 
   // ── Auto-Save to Database ─────────────────────────────────────────────
   useEffect(() => {
-    if (!loaded) return;
+    if (!loaded || !dbFetchCompleted) return;
 
     if (isAutoSyncRef.current) {
       isAutoSyncRef.current = false;
+      return;
+    }
+
+    // Check if columns have actually changed since last sync
+    const currentColsStr = JSON.stringify(columns);
+    const lastSyncedColsStr = JSON.stringify(lastSyncedColumnsRef.current);
+    if (currentColsStr === lastSyncedColsStr) {
       return;
     }
 
@@ -535,7 +574,7 @@ export default function App() {
     return () => {
       if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
     };
-  }, [columns, date, selectedDay, loaded]);
+  }, [columns, date, selectedDay, loaded, dbFetchCompleted]);
 
   // ── Manual Save to Database ─────────────────────────────────────────────
   const handleSaveToDatabase = async (isAutoSave = false) => {
@@ -571,6 +610,7 @@ export default function App() {
         setSaveStatus("saved");
         setSyncStatus("connected");
         isSavingRef.current = false; // Save complete — poller ab sync kar sakta hai
+        lastSyncedColumnsRef.current = JSON.parse(JSON.stringify(columns));
         fetchRecordsFromDB(); // Refresh records
         setTimeout(() => setSaveStatus("idle"), 3000);
         if (!isAutoSave) {
@@ -639,6 +679,7 @@ export default function App() {
       schoolInfo,
       PERIODS,
       timings.majorBreak,
+      teachers,
     );
   }, [
     columns,
@@ -648,6 +689,7 @@ export default function App() {
     schoolInfo,
     PERIODS,
     timings.majorBreak,
+    teachers,
   ]);
 
   // ── Logo handlers ──────────────────────────────────────────────────────────
@@ -739,6 +781,7 @@ export default function App() {
     setDate(record.date);
     setSelectedDay(record.day);
     setColumns(JSON.parse(JSON.stringify(record.columns)));
+    lastSyncedColumnsRef.current = JSON.parse(JSON.stringify(record.columns));
     setCurrentPage("home");
     alert("✅ Record loaded successfully!");
   };
@@ -884,7 +927,7 @@ export default function App() {
       tbody { height: 100%; }
       tbody tr { height: 1px; }
       th, td { border: 0.5px solid #94a3b8; padding: 2px 3px; vertical-align: middle; line-height: 1.15; overflow: hidden; }
-      thead th { background: #1e293b !important; color: white !important; padding: 3px; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      thead th { background: #e2e8f0 !important; color: #1e293b !important; padding: 3px; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 
       .period-cell { background: #e2e8f0 !important; color: #1e293b !important; text-align: center; vertical-align: middle; padding: 1px !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
       .p-label { font-size: 12px; font-weight: 800; color: #1e293b; display: block; }
@@ -907,7 +950,7 @@ export default function App() {
     const pages = chunks
       .map(
         (chunk) =>
-          `<div class="print-page">${buildPrintHTML(chunk, printDate, printDay, schoolInfo, PERIODS, timings.majorBreak)}</div>`,
+          `<div class="print-page">${buildPrintHTML(chunk, printDate, printDay, schoolInfo, PERIODS, timings.majorBreak, teachers)}</div>`,
       )
       .join("\n");
 
@@ -1701,11 +1744,10 @@ export default function App() {
                           <button
                             key={i}
                             onClick={() => setTablePageIdx(i)}
-                            className={`w-8 h-8 rounded-lg font-bold text-sm transition ${
-                              tablePageIdx === i
+                            className={`w-8 h-8 rounded-lg font-bold text-sm transition ${tablePageIdx === i
                                 ? "bg-blue-600 text-white shadow"
                                 : "bg-white text-blue-600 border border-blue-300 hover:bg-blue-100"
-                            }`}
+                              }`}
                           >
                             {i + 1}
                           </button>
@@ -1974,7 +2016,7 @@ export default function App() {
                                   const classVal = col.classValues[pIdx] ?? "";
                                   const isFree = col.selectedTeacher
                                     ? classVal.trim() === "" ||
-                                      classVal.trim().toLowerCase() === "free"
+                                    classVal.trim().toLowerCase() === "free"
                                     : true;
                                   const avail = getAvailableSubstitutes(
                                     teachers,
@@ -2201,6 +2243,7 @@ export default function App() {
             onPrint={handlePrintRecord}
             onPrintAnalytics={handlePrintAnalyticReport}
             periods={PERIODS}
+            teachers={teachers}
           />
         )}
       </div>
@@ -2220,6 +2263,7 @@ function RecordsPage({
   onPrint,
   onPrintAnalytics,
   periods,
+  teachers,
 }: {
   records: AdjustmentRecord[];
   onDelete: (id: string) => void;
@@ -2227,6 +2271,7 @@ function RecordsPage({
   onPrint: (record: AdjustmentRecord) => void;
   onPrintAnalytics: (title: string, contentId: string) => void;
   periods: { label: string; time: string }[];
+  teachers: Teacher[];
 }) {
   const [filterView, setFilterView] = useState<
     "all" | "day" | "week" | "month"
@@ -2680,11 +2725,23 @@ function RecordsPage({
                                             {cv}
                                           </td>
                                           <td className="p-3 border border-slate-200">
-                                            {sub ? (
-                                              <span className="bg-green-100 text-green-800 px-3 py-1 rounded-full font-bold border border-green-300 inline-block">
-                                                {sub}
-                                              </span>
-                                            ) : (
+                                            {sub ? (() => {
+                                              const teacherObj = teachers.find((t) => t.name === sub);
+                                              const freeText = (() => {
+                                                if (!teacherObj) return "";
+                                                const { before, after } = getFreePeriodCounts(
+                                                  teacherObj,
+                                                  record.day,
+                                                  periods.length,
+                                                );
+                                                return ` (${before},${after})`;
+                                              })();
+                                              return (
+                                                <span className="bg-green-100 text-green-800 px-3 py-1 rounded-full font-bold border border-green-300 inline-block">
+                                                  {sub}{freeText}
+                                                </span>
+                                              );
+                                            })() : (
                                               <span className="text-orange-500 italic font-semibold">
                                                 ⚠️ Pending / No Sub
                                               </span>
