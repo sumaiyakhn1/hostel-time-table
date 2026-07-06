@@ -32,7 +32,7 @@ const API_BASE_URL =
     : "https://timetableadjustmentod-2.onrender.com");
 
 const AUTO_SAVE_DELAY = 2000;
-const BREAK_AFTER_IDX = 4;
+const BREAK_AFTER_IDX = 5;
 const DAYS = [
   "Monday",
   "Tuesday",
@@ -48,12 +48,12 @@ const DEFAULT_TIMINGS = {
     { label: "Period 3", start: "10:00", end: "10:40" },
     { label: "Period 4", start: "10:50", end: "11:30" },
     { label: "Period 5", start: "11:30", end: "12:05" },
-    { label: "Period 6", start: "12:25", end: "13:05" },
+    { label: "Period 6", start: "12:05", end: "12:45" },
     { label: "Period 7", start: "13:05", end: "13:40" },
     { label: "Period 8", start: "13:40", end: "14:15" },
     { label: "Period 9", start: "14:15", end: "14:25" },
   ],
-  majorBreak: { start: "12:05", end: "12:25" },
+  majorBreak: { start: "12:45", end: "13:05" },
 };
 
 // ── localStorage KEYS ─────────────────────────────────────────────────────────
@@ -1445,7 +1445,7 @@ export default function App() {
               </p>
 
               <div className="flex flex-col gap-3">
-                {timings.periods.slice(0, 5).map((p, idx) => (
+                {timings.periods.slice(0, 6).map((p, idx) => (
                   <div key={idx} className="flex items-center gap-4">
                     <span className="w-24 font-bold text-slate-800">
                       {p.label}
@@ -1509,8 +1509,8 @@ export default function App() {
                   />
                 </div>
 
-                {timings.periods.slice(5).map((p, i) => {
-                  const idx = i + 5;
+                {timings.periods.slice(6).map((p, i) => {
+                  const idx = i + 6;
                   return (
                     <div key={idx} className="flex items-center gap-4">
                       <span className="w-24 font-bold text-slate-800">
