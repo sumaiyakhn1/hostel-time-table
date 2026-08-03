@@ -7,6 +7,7 @@ import React, {
 } from "react";
 import html2canvas from "html2canvas";
 import jsPDF from "jspdf";
+import * as XLSX from "xlsx";
 import defaultSchoolLogo from "./GITA_NIKETAN_AWASIYA_VIDYALAYA-logo.png";
 import {
   isFirebaseConfigured,
@@ -256,6 +257,149 @@ function extractTeachers(rows: string[][]): Teacher[] {
 function isPeriodFree(teacher: Teacher, day: string, idx: number) {
   const v = (teacher.schedule[day]?.[idx] ?? "").trim();
   return v === "" || v.toLowerCase() === "free" || v === "—" || v === "-";
+}
+
+function countAssignedClassesForDay(teacher: Teacher, day: string): number {
+  const schedule = teacher.schedule[day];
+  if (!schedule || schedule.length === 0) return 0;
+  let count = 0;
+  for (let i = 0; i < schedule.length; i++) {
+    if (!isPeriodFree(teacher, day, i)) count++;
+  }
+  return count;
+}
+
+function getWeeklyTimetableLoad(teacher: Teacher): number {
+  return DAYS.reduce(
+    (sum, day) => sum + countAssignedClassesForDay(teacher, day),
+    0,
+  );
+}
+
+function getWeekdayLong(date: Date): string {
+  return new Intl.DateTimeFormat("en-US", { weekday: "long" }).format(date);
+}
+
+function parseINDateString(dateString: string): Date | null {
+  const parts = dateString.split("/").map((p) => Number(p));
+  if (parts.length !== 3 || parts.some((n) => Number.isNaN(n))) return null;
+  const [d, m, y] = parts;
+  const year = y < 100 ? 2000 + y : y;
+  const date = new Date(year, m - 1, d, 12, 0, 0, 0);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+/** Working dates for the current filter (used for monthly/period timetable load). */
+function getFilterWorkingDates(
+  filterView: "all" | "day" | "week" | "month",
+  records: AdjustmentRecord[],
+): Date[] {
+  const today = new Date();
+  today.setHours(12, 0, 0, 0);
+
+  const rangeBack = (days: number) => {
+    const out: Date[] = [];
+    for (let i = 0; i < days; i++) {
+      const d = new Date(today);
+      d.setDate(d.getDate() - i);
+      out.push(d);
+    }
+    return out;
+  };
+
+  if (filterView === "day") return [new Date(today)];
+  if (filterView === "week") return rangeBack(7);
+  if (filterView === "month") return rangeBack(30);
+
+  let minTs = today.getTime();
+  let found = false;
+  records.forEach((r) => {
+    const d = parseINDateString(r.date);
+    if (d) {
+      found = true;
+      if (d.getTime() < minTs) minTs = d.getTime();
+    }
+  });
+  if (!found) return rangeBack(30);
+
+  const out: Date[] = [];
+  const cursor = new Date(minTs);
+  cursor.setHours(12, 0, 0, 0);
+  while (cursor.getTime() <= today.getTime()) {
+    out.push(new Date(cursor));
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return out;
+}
+
+interface TeacherWorkloadRow {
+  name: string;
+  weeklyTimetableLoad: number;
+  timetableLoad: number;
+  adjustmentLoad: number;
+  daysAbsent: number;
+  totalLoad: number;
+}
+
+function buildTeacherWorkload(
+  teachers: Teacher[],
+  filteredRecords: AdjustmentRecord[],
+  filterView: "all" | "day" | "week" | "month",
+  allRecords: AdjustmentRecord[],
+): TeacherWorkloadRow[] {
+  const workingDates = getFilterWorkingDates(
+    filterView,
+    filterView === "all" ? allRecords : filteredRecords,
+  );
+
+  const adjustmentByTeacher: Record<string, number> = {};
+  const absentDaysByTeacher: Record<string, Set<string>> = {};
+
+  filteredRecords.forEach((record) => {
+    record.columns.forEach((col) => {
+      if (col.selectedTeacher?.trim()) {
+        const name = col.selectedTeacher.trim();
+        if (!absentDaysByTeacher[name]) absentDaysByTeacher[name] = new Set();
+        absentDaysByTeacher[name].add(record.date);
+      }
+      col.substituteTeacher.forEach((sub) => {
+        const name = sub?.trim();
+        if (!name) return;
+        adjustmentByTeacher[name] = (adjustmentByTeacher[name] || 0) + 1;
+      });
+    });
+  });
+
+  const names = new Set<string>();
+  teachers.forEach((t) => names.add(t.name));
+  Object.keys(adjustmentByTeacher).forEach((n) => names.add(n));
+  Object.keys(absentDaysByTeacher).forEach((n) => names.add(n));
+
+  return Array.from(names)
+    .map((name) => {
+      const teacher = teachers.find((t) => t.name === name);
+      const weeklyTimetableLoad = teacher ? getWeeklyTimetableLoad(teacher) : 0;
+      let timetableLoad = 0;
+      if (teacher) {
+        workingDates.forEach((d) => {
+          const day = getWeekdayLong(d);
+          if (DAYS.includes(day)) {
+            timetableLoad += countAssignedClassesForDay(teacher, day);
+          }
+        });
+      }
+      const adjustmentLoad = adjustmentByTeacher[name] || 0;
+      const daysAbsent = absentDaysByTeacher[name]?.size || 0;
+      return {
+        name,
+        weeklyTimetableLoad,
+        timetableLoad,
+        adjustmentLoad,
+        daysAbsent,
+        totalLoad: timetableLoad + adjustmentLoad,
+      };
+    })
+    .sort((a, b) => b.totalLoad - a.totalLoad || a.name.localeCompare(b.name));
 }
 
 function getFreePeriodCounts(
@@ -2277,7 +2421,9 @@ function RecordsPage({
     "all" | "day" | "week" | "month"
   >("all");
   const [searchQuery, setSearchQuery] = useState("");
-  const [activeTab, setActiveTab] = useState<"list" | "stats">("list");
+  const [activeTab, setActiveTab] = useState<"list" | "stats" | "workload">(
+    "list",
+  );
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   // 1. Filter Logic
@@ -2337,11 +2483,19 @@ function RecordsPage({
       .sort((a, b) => b.count - a.count);
   }, [filteredRecords]);
 
-  const parseINDate = (dateString: string) => {
-    const parts = dateString.split("/").map((p) => Number(p));
-    if (parts.length !== 3) return null;
-    return new Date(parts[2], parts[1] - 1, parts[0]);
-  };
+  // 4. Teachers Workload = Timetable classes in period + Adjustment classes taken
+  const teacherWorkload = useMemo(
+    () => buildTeacherWorkload(teachers, filteredRecords, filterView, records),
+    [teachers, filteredRecords, filterView, records],
+  );
+
+  const filteredWorkload = useMemo(() => {
+    if (!searchQuery.trim()) return teacherWorkload;
+    const q = searchQuery.toLowerCase();
+    return teacherWorkload.filter((row) => row.name.toLowerCase().includes(q));
+  }, [teacherWorkload, searchQuery]);
+
+  const parseINDate = (dateString: string) => parseINDateString(dateString);
 
   const formatExportHeader = (dateString: string) => {
     const date = parseINDate(dateString);
@@ -2355,16 +2509,8 @@ function RecordsPage({
     return `${day}.${month}.${year} ${weekday}`;
   };
 
-  const escapeCsv = (value: string | number) => {
-    const str = String(value ?? "");
-    if (/[,\n"]/g.test(str)) {
-      return `"${str.replace(/"/g, '""')}"`;
-    }
-    return str;
-  };
-
   const handleExportMonthlyReport = () => {
-    if (filteredRecords.length === 0) {
+    if (filteredRecords.length === 0 && teacherWorkload.length === 0) {
       alert("No records available to export.");
       return;
     }
@@ -2382,7 +2528,7 @@ function RecordsPage({
     const weekStart = Date.now() - 7 * 24 * 60 * 60 * 1000;
     const weeklyRecords = records.filter((r) => r.timestamp >= weekStart);
 
-    // Weekly load per teacher calculate karo
+    // Weekly load per teacher calculate karo (adjustment only)
     const weeklyLoadByTeacher: Record<string, number> = {};
     weeklyRecords.forEach((record) => {
       record.columns.forEach((col) => {
@@ -2426,44 +2572,76 @@ function RecordsPage({
       });
     });
 
-    // Get week range label for header
     const weekEndDate = new Date();
     const weekStartDate = new Date(weekStart);
-    const weekLabel = `Week Load (${weekStartDate.getDate()}/${weekStartDate.getMonth() + 1} - ${weekEndDate.getDate()}/${weekEndDate.getMonth() + 1})`;
+    const weekLabel = `Week Adj Load (${weekStartDate.getDate()}/${weekStartDate.getMonth() + 1} - ${weekEndDate.getDate()}/${weekEndDate.getMonth() + 1})`;
 
-    const headers = [
+    const filterLabel =
+      filterView === "day"
+        ? "Today"
+        : filterView === "week"
+          ? "This Week"
+          : filterView === "month"
+            ? "This Month"
+            : "All Time";
+
+    // Sheet 1: Daily adjustment matrix
+    const adjustmentHeaders = [
       "SR.No",
       "Name",
       weekLabel,
       ...uniqueDates.map(formatExportHeader),
-      "Total",
+      "Total Adjustments",
     ];
-    const rows = teacherNames.map((name, idx) => {
+    const adjustmentRows = teacherNames.map((name, idx) => {
       const dailyCounts = uniqueDates.map(
         (date) => countsByTeacher[name][date] ?? 0,
       );
       const total = dailyCounts.reduce((sum, value) => sum + value, 0);
-      // Load = is week ka total substitute count (all records se, sirf last 7 days)
       const weeklyLoad = weeklyLoadByTeacher[name] || 0;
       return [idx + 1, name, weeklyLoad, ...dailyCounts, total];
     });
 
-    const csv = [headers, ...rows]
-      .map((row) => row.map((value) => escapeCsv(value)).join(","))
-      .join("\n");
+    // Sheet 2: Teachers Workload (timetable + adjustment)
+    const workloadHeaders = [
+      "SR.No",
+      "Teacher Name",
+      "Weekly Timetable Load",
+      `Timetable Classes (${filterLabel})`,
+      `Adjustment Classes (${filterLabel})`,
+      "Days Absent",
+      "Total Workload (Timetable + Adjustment)",
+    ];
+    const workloadRows = teacherWorkload.map((row, idx) => [
+      idx + 1,
+      row.name,
+      row.weeklyTimetableLoad,
+      row.timetableLoad,
+      row.adjustmentLoad,
+      row.daysAbsent,
+      row.totalLoad,
+    ]);
 
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.setAttribute(
-      "download",
-      `Adjustment_Monthly_Report_${new Date().toISOString().slice(0, 10)}.csv`,
+    const wb = XLSX.utils.book_new();
+
+    const wsAdjustment = XLSX.utils.aoa_to_sheet([
+      adjustmentHeaders,
+      ...adjustmentRows,
+    ]);
+    XLSX.utils.book_append_sheet(wb, wsAdjustment, "Adjustment Matrix");
+
+    const wsWorkload = XLSX.utils.aoa_to_sheet([
+      [`Teachers Workload — ${filterLabel}`],
+      [],
+      workloadHeaders,
+      ...workloadRows,
+    ]);
+    XLSX.utils.book_append_sheet(wb, wsWorkload, "Teachers Workload");
+
+    XLSX.writeFile(
+      wb,
+      `Teachers_Workload_Report_${new Date().toISOString().slice(0, 10)}.xlsx`,
     );
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
   };
 
   return (
@@ -2494,7 +2672,9 @@ function RecordsPage({
                 `Adjustment Report - ${filterView.toUpperCase()}`,
                 activeTab === "list"
                   ? "analytics-list-content"
-                  : "analytics-stats-content",
+                  : activeTab === "stats"
+                    ? "analytics-stats-content"
+                    : "analytics-workload-content",
               )
             }
             className="bg-white text-blue-700 px-6 py-2 rounded-lg font-bold hover:bg-blue-50 transition flex items-center gap-2"
@@ -2549,7 +2729,7 @@ function RecordsPage({
       </div>
 
       {/* Inner Tabs for View Switch */}
-      <div className="flex gap-2 mb-2">
+      <div className="flex gap-2 mb-2 flex-wrap">
         <button
           onClick={() => setActiveTab("list")}
           className={`px-5 py-2 font-bold rounded-t-lg transition ${activeTab === "list" ? "bg-white text-blue-700 shadow-sm" : "bg-slate-200 text-slate-500 hover:bg-slate-300"}`}
@@ -2561,6 +2741,12 @@ function RecordsPage({
           className={`px-5 py-2 font-bold rounded-t-lg transition ${activeTab === "stats" ? "bg-white text-blue-700 shadow-sm" : "bg-slate-200 text-slate-500 hover:bg-slate-300"}`}
         >
           🏆 Teacher Analytics (Leaderboard)
+        </button>
+        <button
+          onClick={() => setActiveTab("workload")}
+          className={`px-5 py-2 font-bold rounded-t-lg transition ${activeTab === "workload" ? "bg-white text-blue-700 shadow-sm" : "bg-slate-200 text-slate-500 hover:bg-slate-300"}`}
+        >
+          📊 Teachers Workload
         </button>
       </div>
 
@@ -2871,6 +3057,123 @@ function RecordsPage({
                       </tr>
                     );
                   })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── TAB 3: TEACHERS WORKLOAD ── */}
+      {activeTab === "workload" && (
+        <div
+          id="analytics-workload-content"
+          className="bg-white rounded-xl shadow-sm border border-slate-200 p-6"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-4 mb-6 border-b pb-4">
+            <div>
+              <h2 className="text-xl font-bold text-slate-800">
+                📊 Teachers Workload
+              </h2>
+              <p className="text-slate-500 text-sm mt-1">
+                Timetable classes assigned in the selected period + adjustment
+                classes taken. Filter:{" "}
+                <strong className="text-blue-600 uppercase">{filterView}</strong>
+                {filterView === "month" && " (last 30 days)"}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2 text-sm">
+              <div className="bg-indigo-50 text-indigo-800 px-3 py-2 rounded-lg font-bold border border-indigo-200">
+                Teachers: {filteredWorkload.length}
+              </div>
+              <div className="bg-emerald-50 text-emerald-800 px-3 py-2 rounded-lg font-bold border border-emerald-200">
+                Total Adj:{" "}
+                {filteredWorkload.reduce((s, r) => s + r.adjustmentLoad, 0)}
+              </div>
+            </div>
+          </div>
+
+          {filteredWorkload.length === 0 ? (
+            <div className="text-center py-10 text-slate-500 italic">
+              No teacher workload data available. Load the Google Sheet and ensure
+              records exist for this period.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm border-collapse rounded-lg overflow-hidden border border-slate-200">
+                <thead className="bg-slate-800 text-white">
+                  <tr>
+                    <th className="p-3 border border-slate-700 w-14 text-center">
+                      #
+                    </th>
+                    <th className="p-3 border border-slate-700">Teacher Name</th>
+                    <th className="p-3 border border-slate-700 text-center">
+                      Weekly Timetable
+                    </th>
+                    <th className="p-3 border border-slate-700 text-center">
+                      Timetable Classes
+                      <div className="text-[10px] font-normal opacity-80">
+                        (period assigned)
+                      </div>
+                    </th>
+                    <th className="p-3 border border-slate-700 text-center">
+                      Adjustment Load
+                      <div className="text-[10px] font-normal opacity-80">
+                        (subs taken)
+                      </div>
+                    </th>
+                    <th className="p-3 border border-slate-700 text-center">
+                      Days Absent
+                    </th>
+                    <th className="p-3 border border-slate-700 text-center">
+                      Total Workload
+                      <div className="text-[10px] font-normal opacity-80">
+                        Timetable + Adjustment
+                      </div>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredWorkload.map((row, idx) => (
+                    <tr
+                      key={row.name}
+                      className="border-b border-slate-100 hover:bg-slate-50 transition even:bg-slate-50/60"
+                    >
+                      <td className="p-3 text-center text-slate-500 font-semibold">
+                        {idx + 1}
+                      </td>
+                      <td className="p-3 font-bold text-slate-800">{row.name}</td>
+                      <td className="p-3 text-center">
+                        <span className="bg-slate-100 text-slate-700 px-3 py-1 rounded-full font-semibold border border-slate-200">
+                          {row.weeklyTimetableLoad}
+                        </span>
+                      </td>
+                      <td className="p-3 text-center">
+                        <span className="bg-indigo-50 text-indigo-800 px-3 py-1 rounded-full font-bold border border-indigo-200">
+                          {row.timetableLoad}
+                        </span>
+                      </td>
+                      <td className="p-3 text-center">
+                        <span className="bg-emerald-50 text-emerald-800 px-3 py-1 rounded-full font-bold border border-emerald-200">
+                          {row.adjustmentLoad}
+                        </span>
+                      </td>
+                      <td className="p-3 text-center">
+                        {row.daysAbsent > 0 ? (
+                          <span className="bg-red-50 text-red-700 px-3 py-1 rounded-full font-bold border border-red-200">
+                            {row.daysAbsent}
+                          </span>
+                        ) : (
+                          <span className="text-slate-400">0</span>
+                        )}
+                      </td>
+                      <td className="p-3 text-center">
+                        <span className="bg-blue-100 text-blue-900 px-4 py-1.5 rounded-full font-black border border-blue-300">
+                          {row.totalLoad}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>
